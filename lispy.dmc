@@ -1,0 +1,211 @@
+# lispy.dmc — a Scheme interpreter in demoniC.
+#
+# A translation of Peter Norvig's lispy.py (http://norvig.com/lispy.html,
+# public domain) targeting demoniC's `dmc run`. Tokenizer + parser +
+# tree-walking evaluator over a tagged-list AST.
+#
+# TRANSLATION NOTES (gaps surfaced vs. the Python original — see issue #156):
+#
+#   1. No runtime type introspection (`isinstance`). Python's eval dispatches
+#      on whether a node is a Symbol / Number / list. demoniC has no
+#      `is_str` / `is_int` / `is_list` predicate and `match` cannot
+#      discriminate value kinds. WORKAROUND: every AST node is tagged at parse
+#      time as a list whose first element is a string tag:
+#         number → ["n", <f64>]      symbol → ["s", <str>]
+#         list   → ["l", <node>...]
+#      eval() then dispatches on `list_get(node, 0)` with string `==`.
+#
+#   2. No safe string→number parse. Python's `atom()` uses try/except to test
+#      int-then-float-then-symbol. demoniC's `to_int`/`to_float` ABORT on a
+#      non-numeric string and there is no `is_numeric` predicate. WORKAROUND:
+#      a hand-written `looks_numeric` that inspects the first byte.
+#
+#   3. No collapsing whitespace split. Python's `str.split()` collapses runs
+#      of whitespace; demoniC's `.split(" ")` yields empty tokens. WORKAROUND:
+#      filter empty strings after splitting.
+#
+#   4. No first-class procedures stored as environment values (the env here
+#      maps symbols → f64 only). Builtin operators are dispatched by name
+#      inside eval rather than stored as callable values. A faithful port
+#      would need heterogeneous env values (number | procedure), which loops
+#      back to gap #1 (no way to tell them apart at lookup time).
+
+# ── Tokenizer ────────────────────────────────────────────────────────────────
+# "(+ 1 2)" → ["(", "+", "1", "2", ")"]
+fn tokenize(src: str) -> list {
+    let spaced = src.replace("(", " ( ").replace(")", " ) ")
+    let raw = spaced.split(" ")
+    let !toks = list()
+    let n = list_len(raw)
+    let !i = 0
+    while i < n {
+        let t = list_get(raw, i)
+        # Gap #3 workaround: drop empty tokens from consecutive spaces.
+        if !(t == "") {
+            toks = list_push(toks, t)
+        }
+        i = i + 1
+    }
+    toks
+}
+
+# ── Numeric test (gap #2 workaround) ───────────────────────────────────────────
+# True if the token's first byte is a digit, '-', or '.'.
+fn looks_numeric(tok: str) -> bool {
+    if len(tok) == 0 { return false }
+    let c = tok[0]
+    # '0'..'9' = 48..57, '-' = 45, '.' = 46
+    (c >= 48 && c <= 57) || c == 45 || c == 46
+}
+
+# ── Atom: tag a token as number or symbol ──────────────────────────────────────
+fn atom(tok: str) -> list {
+    let !node = list()
+    if looks_numeric(tok) && !(tok == "-") {
+        node = list_push(node, "n")
+        node = list_push(node, to_float(tok))
+    } else {
+        node = list_push(node, "s")
+        node = list_push(node, tok)
+    }
+    node
+}
+
+# ── Parser ─────────────────────────────────────────────────────────────────────
+# Recursive descent over the token list. Returns (node, next_index).
+# A node is ["n", f64] | ["s", str] | ["l", node, node, ...].
+fn parse_from(toks: list, start: i64) -> (list, i64) {
+    let tok = list_get(toks, start)
+    if tok == "(" {
+        let !node = list()
+        node = list_push(node, "l")
+        let !i = start + 1
+        let n = list_len(toks)
+        while i < n {
+            let t = list_get(toks, i)
+            if t == ")" {
+                return (node, i + 1)
+            }
+            let (child, next) = parse_from(toks, i)
+            node = list_push(node, child)
+            i = next
+        }
+        panic("unexpected EOF: missing )")
+    } else if tok == ")" {
+        panic("unexpected )")
+    } else {
+        (atom(tok), start + 1)
+    }
+}
+
+fn parse(src: str) -> list {
+    let toks = tokenize(src)
+    let (node, _) = parse_from(toks, 0)
+    node
+}
+
+# ── Evaluator ──────────────────────────────────────────────────────────────────
+# env maps symbol → f64.  Returns the f64 value of an expression node.
+fn eval_node(node: list, env: map) -> f64 {
+    let tag = list_get(node, 0)
+    if tag == "n" {
+        return list_get(node, 1)
+    }
+    if tag == "s" {
+        let sym = list_get(node, 1)
+        return map_get(env, sym)
+    }
+    # tag == "l": application or special form.
+    let head = list_get(node, 1)       # ["s", op] for known forms
+    let op = list_get(head, 1)         # the operator symbol string
+
+    if op == "if" {
+        # (if test conseq alt)
+        let test = eval_node(list_get(node, 2), env)
+        if test != 0.0 {
+            return eval_node(list_get(node, 3), env)
+        } else {
+            return eval_node(list_get(node, 4), env)
+        }
+    }
+
+    # Arithmetic / comparison builtins: fold over the argument nodes.
+    let nargs = list_len(node) - 2
+    if op == "+" {
+        let !acc = 0.0
+        let !i = 0
+        while i < nargs {
+            acc = acc + eval_node(list_get(node, i + 2), env)
+            i = i + 1
+        }
+        return acc
+    }
+    if op == "*" {
+        let !acc = 1.0
+        let !i = 0
+        while i < nargs {
+            acc = acc * eval_node(list_get(node, i + 2), env)
+            i = i + 1
+        }
+        return acc
+    }
+    if op == "-" {
+        let first = eval_node(list_get(node, 2), env)
+        if nargs == 1 { return 0.0 - first }
+        let !acc = first
+        let !i = 1
+        while i < nargs {
+            acc = acc - eval_node(list_get(node, i + 2), env)
+            i = i + 1
+        }
+        return acc
+    }
+    if op == "<" {
+        let a = eval_node(list_get(node, 2), env)
+        let b = eval_node(list_get(node, 3), env)
+        if a < b { return 1.0 } else { return 0.0 }
+    }
+
+    panic("unknown operator")
+}
+
+# ── REPL-ish driver ─────────────────────────────────────────────────────────────
+fn run(src: str) -> f64 {
+    let !env = map()
+    eval_node(parse(src), env)
+}
+
+# --- numeric gates ---
+# Each expected value is the standard Scheme arithmetic result, known by hand.
+fn test_arith() -> bool {
+    # (+ 1 (* 2 3)) = 1 + 6 = 7
+    isclose(run("(+ 1 (* 2 3))"), 7.0)
+    # (* (+ 1 2) (- 8 3)) = 3 * 5 = 15
+    && isclose(run("(* (+ 1 2) (- 8 3))"), 15.0)
+    # (- 10 1 2 3) = 10 - 1 - 2 - 3 = 4  (left fold)
+    && isclose(run("(- 10 1 2 3)"), 4.0)
+}
+
+fn test_unary_minus() -> bool {
+    # (- 7) negates its single argument = -7
+    isclose(run("(- 7)"), -7.0)
+}
+
+fn test_if() -> bool {
+    # (if (< 2 3) 10 20): 2 < 3 is true -> 10
+    isclose(run("(if (< 2 3) 10 20)"), 10.0)
+    # (if (< 3 2) 10 20): false -> 20
+    && isclose(run("(if (< 3 2) 10 20)"), 20.0)
+}
+
+fn main() -> nil {
+    # (+ 1 (* 2 3))  = 7
+    print(run("(+ 1 (* 2 3))"))
+    # (if (< 2 3) 10 20) = 10
+    print(run("(if (< 2 3) 10 20)"))
+    # (- 10 1 2 3) = 4
+    print(run("(- 10 1 2 3)"))
+    # nested: (* (+ 1 2) (- 8 3)) = 15
+    print(run("(* (+ 1 2) (- 8 3))"))
+    nil
+}

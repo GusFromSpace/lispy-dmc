@@ -1,0 +1,12 @@
+lispy-dmc
+=========
+
+This is a demoniC port of an existing open-source work.
+
+  Upstream:   Peter Norvig's lispy.py
+  Source:     http://norvig.com/lispy.html
+  Author(s):  Peter Norvig
+
+The port is distributed under terms matching the upstream (see LICENSE).
+Verify the upstream's actual license before publishing — labels in source
+headers have been wrong before.
