@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Watch the public demoniC compiler: rebuild against its current main
+    # daily and fail loudly if this port stops working under it.
+    - cron: "20 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build dmc, test both interpreters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build dmc from the public demoniC repo
+        run: |
+          git clone --depth 1 https://github.com/GusFromSpace/demoniC "$RUNNER_TEMP/demoniC"
+          cargo build --release --manifest-path "$RUNNER_TEMP/demoniC/compiler/Cargo.toml"
+      - name: dmc test (ground-truth gate)
+        run: |
+          "$RUNNER_TEMP/demoniC/compiler/target/release/dmc" test .
+      - name: dmc test --jit (backend parity)
+        run: |
+          "$RUNNER_TEMP/demoniC/compiler/target/release/dmc" test --jit .
